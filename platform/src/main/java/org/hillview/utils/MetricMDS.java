@@ -5,27 +5,27 @@ import org.jblas.MatrixFunctions;
 import org.jblas.ranges.PointRange;
 import org.jblas.ranges.AllRange;
 
+import java.util.Random;
 import java.util.function.BiFunction;
 
 public class MetricMDS {
-    public static int maxIters = 1000;
+    public static int maxIterations = (int) 1e4;
     public static double defaultLearningRate = 0.1;
-    public static double defaultStopTolerance = 0.1;
-    public static BiFunction<DoubleMatrix, DoubleMatrix, Double> squaredEuclid = (x1, x2) -> MatrixFunctions.pow(x1.min(x2), 2).sum();
-    public static BiFunction<DoubleMatrix, DoubleMatrix, Double> euclid = (x1, x2) -> MatrixFunctions.sqrt(MetricMDS.squaredEuclid.apply(x1, x2));
+    public static double tolerance = 1e-8;
+    public static int minConvergedCount = 10;
+
+    public static BiFunction<DoubleMatrix, DoubleMatrix, Double> squaredEuclid = (x1, x2) -> MatrixFunctions.pow(x1.sub
+            (x2), 2).sum();
+    public static BiFunction<DoubleMatrix, DoubleMatrix, Double> euclid = (x1, x2) -> Math.sqrt(MetricMDS.squaredEuclid.apply(x1, x2));
 
     /**
      * Number of observations in the dataset.
      */
-    private int N;
-    /**
-     * Number of input dimensions
-     */
-    private int n;
+    private int numObservations;
     /**
      * Number of output dimensions
      */
-    private int m;
+    private int lowDims;
     /**
      * Learning rate to use in the optimization.
      */
@@ -33,7 +33,7 @@ public class MetricMDS {
     /**
      * If the magnitude of the gradient is smaller than this value, we consider the optimization converged.
      */
-    public double stopTolerance = MetricMDS.defaultStopTolerance;
+    public double stopTolerance = MetricMDS.tolerance;
 
     /**
      * Constant term in the cost gradient that can be reused over the entire optimization.
@@ -41,8 +41,6 @@ public class MetricMDS {
      * only counted once) pairs of nD points.
      */
     private double c1;
-
-    private BiFunction<DoubleMatrix, DoubleMatrix, Double> lowDimDist;
 
     /**
      * All pairwise distances d(i, j) in nD. Since it is symmetric, only the upper-triangular part is stored.
@@ -53,49 +51,50 @@ public class MetricMDS {
     private final DoubleMatrix ndDists;
 
     /**
-     * The low-dimensional embedding of the high-dimensional data.
+     * Same format for the low-dimensional distances, but this matrix is recomputed every epoch.
      */
-    private DoubleMatrix dataMd;
+    private final DoubleMatrix mdDists;
 
     /**
-     *
-     * @param dataNd High-dimensional data with observations/{data points} as rows, and dimensions/features as columns.
-     * @param m The target dimensionality of the embedding. Commonly 2.
-     * @param highDimDist The distance function for nD observations. Commonly Euclidean.
-     * @param lowDimDist The distance function for mD observations. Commonly Euclidean.
+     * The low-dimensional embedding of the high-dimensional data.
      */
-    public MetricMDS(DoubleMatrix dataNd, int m, BiFunction<DoubleMatrix, DoubleMatrix, Double> highDimDist,
-                     BiFunction<DoubleMatrix, DoubleMatrix, Double> lowDimDist) {
-        this.N = dataNd.rows;
-        this.n = dataNd.columns;
-        this.m = m;
-        this.lowDimDist = lowDimDist;
-        this.ndDists = this.computeNdDistances(dataNd, highDimDist);
+    private final DoubleMatrix dataMd;
+
+    /**
+     * Constructs an object that calculates the MDS projection. Note that the low-dimensional distance metric is
+     * always the Euclidean distance, as the gradient is calculated for this.
+     * @param dataNd High-dimensional data with observations/{data points} as rows, and dimensions/features as columns.
+     * @param lowDims The target dimensionality of the embedding. Commonly 2.
+     * @param highDimDist The distance function for nD observations. Commonly Euclidean.
+     */
+    public MetricMDS(DoubleMatrix dataNd, int lowDims, BiFunction<DoubleMatrix, DoubleMatrix, Double> highDimDist) {
+        this.numObservations = dataNd.rows;
+        this.lowDims = lowDims;
+        this.ndDists = this.computeHighDimDistances(dataNd, highDimDist);
+        this.dataMd = new DoubleMatrix();
+        this.mdDists = new DoubleMatrix();
+        this.c1 = Math.sqrt(1 / MatrixFunctions.pow(this.ndDists, 2).sum());
     }
 
-    public MetricMDS(DoubleMatrix dataNd, int m, BiFunction<DoubleMatrix, DoubleMatrix, Double> distNd) {
-        this(dataNd, m, distNd, MetricMDS.euclid);
-    }
-
-    public MetricMDS(DoubleMatrix dataNd, int m) {
-        this(dataNd, m, MetricMDS.euclid);
+    public MetricMDS(DoubleMatrix dataNd, int lowDims) {
+        this(dataNd, lowDims, MetricMDS.euclid);
     }
 
     public MetricMDS(DoubleMatrix dataNd) {
         this(dataNd, 2);
     }
 
-    private DoubleMatrix computeNdDistances(DoubleMatrix dataNd, BiFunction<DoubleMatrix, DoubleMatrix, Double> distNd) {
-        DoubleMatrix dists = new DoubleMatrix(dataNd.rows);
+    private DoubleMatrix computeHighDimDistances(DoubleMatrix dataNd, BiFunction<DoubleMatrix, DoubleMatrix, Double> distNd) {
+        DoubleMatrix dists = new DoubleMatrix((dataNd.rows * (dataNd.rows - 1)) / 2);
         for (int i = 0; i < dataNd.rows - 1; i++) {
             DoubleMatrix x1 = dataNd.get(new PointRange(i), new AllRange());
             for (int j = i + 1; j < dataNd.rows; j++) {
                 DoubleMatrix x2 = dataNd.get(new PointRange(j), new AllRange());
                 double dist = distNd.apply(x1, x2);
-                dists.put(i * (dataNd.rows - (i + 3) / 2) + j - 1, dist);
+                int idx = i * dataNd.rows - (i * (i + 3)) / 2 + j - 1;
+                dists.put(idx, dist);
             }
         }
-        this.c1 = Math.sqrt(1 / MatrixFunctions.pow(dists, 2).sum());
         return dists;
     }
 
@@ -107,50 +106,119 @@ public class MetricMDS {
      */
     private double getHighDimDist(int i, int j) {
         if (i < j)
-            return this.ndDists.get(i * (this.N - (i + 3) / 2) + j - 1);
+            return this.ndDists.get(i * this.numObservations - (i * (i + 3)) / 2 + j - 1);
         else if (j < i) {
-            return this.ndDists.get(j * (this.N - (j + 3) / 2) + i - 1);
+            return this.ndDists.get(j * this.numObservations - (j * (j + 3)) / 2 + i - 1);
         } else {
             return 0;
         }
     }
 
+    private DoubleMatrix computeLowDimDistances(DoubleMatrix dataMd) {
+        DoubleMatrix dists = new DoubleMatrix((dataMd.rows * (dataMd.rows - 1)) / 2);
+        for (int i = 0; i < dataMd.rows - 1; i++) {
+            DoubleMatrix x1 = dataMd.get(new PointRange(i), new AllRange());
+            for (int j = i + 1; j < dataMd.rows; j++) {
+                DoubleMatrix x2 = dataMd.get(new PointRange(j), new AllRange());
+                double dist = MetricMDS.euclid.apply(x1, x2);
+                int idx = i * dataMd.rows - (i * (i + 3)) / 2 + j - 1;
+                dists.put(idx, dist);
+            }
+        }
+        return dists;
+    }
+
     private double getLowDimDist(int i, int j) {
-        return this.lowDimDist.apply(
-                this.dataMd.get(new PointRange(i), new AllRange()),
-                this.dataMd.get(new PointRange(j), new AllRange())
-        );
+        if (i < j)
+            return this.mdDists.get(i * this.numObservations - (i * (i + 3)) / 2 + j - 1);
+        else if (j < i) {
+            return this.mdDists.get(j * this.numObservations - (j * (j + 3)) / 2 + i - 1);
+        } else {
+            return 0;
+        }
     }
 
     public DoubleMatrix computeEmbedding(DoubleMatrix dataMdInit) {
-        int iters = 0;
-        double disp;
+        this.dataMd.copy(dataMdInit);
+        
+        int iterations = 0;
+        double step;
+        double cost = 0.0;
+        int convergedCount = 0;
         do {
-            disp = this.doEpoch();
-            iters += 1;
-        } while (disp > this.stopTolerance && iters < MetricMDS.maxIters);
-        if (disp > this.stopTolerance)
+            DoubleMatrix gradient = this.gradient();
+            double magnitude = MatrixFunctions.pow(gradient, 2).sum();
+            /* Actual learning step */
+            this.dataMd.addi(gradient.mul(this.learningRate).neg());
+            double newCost = this.cost();
+            step = newCost - cost;
+            System.out.println(String.format("[iter %d]:\n\tcost: %6.3e\n\tstep: %6.3e\n\tmagnitude: %6.3e",
+                    iterations, newCost, step, magnitude));
+            iterations++;
+            cost = newCost;
+            if (iterations > 0 && Math.abs(step) < MetricMDS.tolerance) {
+                convergedCount++;
+                System.out.println(convergedCount);
+            } else
+                convergedCount = 0;
+        } while (convergedCount < MetricMDS.minConvergedCount && iterations < MetricMDS.maxIterations);
+
+        if (convergedCount < MetricMDS.minConvergedCount)
             System.out.println("Warning: Terminated before tolerance was met.");
         return this.dataMd;
     }
 
-    public double doEpoch() {
-        DoubleMatrix gradient = new DoubleMatrix(this.N, this.m);
-        // TODO: Compute gradient.
-        double magnitude = Math.sqrt(MatrixFunctions.pow(gradient, 2).sum());
-        this.dataMd.addi(gradient.mul(this.learningRate));
-        return magnitude;
+    public DoubleMatrix computeEmbedding() {
+        DoubleMatrix dataMdInit = new DoubleMatrix(this.numObservations, this.lowDims);
+        Random rnd = new Random();
+        rnd.nextGaussian();
+        for (int i = 0; i < this.numObservations; i++) {
+            for (int j = 0; j < this.lowDims; j++) {
+                dataMdInit.put(i, j, rnd.nextGaussian());
+            }
+        }
+        return this.computeEmbedding(dataMdInit);
+    }
+
+    /**
+     * Compute the gradient.
+     * @return The gradient of the cost function w.r.t. the low-dimensional points.
+     */
+    private DoubleMatrix gradient() {
+        DoubleMatrix gradient = DoubleMatrix.zeros(this.numObservations, this.lowDims);
+        this.mdDists.copy(this.computeLowDimDistances(this.dataMd));
+
+        /* Loop over all pairs of points. */
+        for (int i = 0; i < this.numObservations - 1; i++) {
+            DoubleMatrix pointI = this.dataMd.getRow(i);
+            for (int j = i + 1; j < this.numObservations; j++) {
+                DoubleMatrix pointJ = this.dataMd.getRow(j);
+                /* Compute gradient for point i (only w.r.t. points with index > i) */
+
+                /* Vector from (low-dim) point i to point j */
+                DoubleMatrix gradientI = pointJ.sub(pointI);
+                /* Make it a unit vector */
+                gradientI.divi(this.getLowDimDist(j, i));
+
+                /* Scale by the discrepancy */
+                gradientI.muli(this.getHighDimDist(j, i) - this.getLowDimDist(j, i));
+
+                /* Exploit symmetry: The gradient on i caused by j is equal to the inverse gradient on j caused by i. */
+                gradient.putRow(i, gradient.getRow(i).add(gradientI));
+                gradient.putRow(j, gradient.getRow(j).add(gradientI.neg()));
+            }
+        }
+
+        /* Normalization factors */
+        double c = 1 / Math.sqrt(MatrixFunctions.pow(this.ndDists.sub(this.mdDists), 2).sum());
+        gradient.muli(c);
+
+        return gradient;
     }
 
     public double cost() {
-        double cost = 0.0;
-        for (int i = 0; i < this.N - 1; i++) {
-            for (int j = i + 1; j < this.N; j++) {
-                cost += Math.pow(this.getHighDimDist(i, j) - this.getLowDimDist(i, j), 2);
-            }
-        }
+        double cost = MatrixFunctions.pow(this.ndDists.sub(this.mdDists), 2).sum();
         cost = Math.sqrt(cost);
-        cost *= this.c1;
         return cost;
     }
 }
