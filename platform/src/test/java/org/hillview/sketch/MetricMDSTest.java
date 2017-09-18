@@ -25,7 +25,7 @@ public class MetricMDSTest {
     @Test
     public void testMetricMds() {
         double scale = 500;
-        DoubleMatrix data = this.makeGrid(3, 6, scale);
+        DoubleMatrix data = this.makeGrid(25, 4, scale);
 
         MetricMDS mds = new MetricMDS(data);
         DoubleMatrix proj = mds.computeEmbedding();
@@ -35,9 +35,8 @@ public class MetricMDSTest {
         chart.getStyler().setChartTitleVisible(false);
         chart.getStyler().setLegendVisible(false);
         chart.getStyler().setMarkerSize(16);
-        XYSeries a = chart.addSeries("Original", data.getColumn(0).div(1).data, data.getColumn
-                (1).div(1).data);
-        a.setFillColor();
+        XYSeries a = chart.addSeries("Original", data.getColumn(0).mul(mds.scaling).data, data.getColumn
+                (1).mul(mds.scaling).data);
         chart.addSeries("MDS", proj.getColumn(0).data, proj.getColumn(1).data);
         try {
             BitmapEncoder.saveBitmap(chart, "./projection", BitmapEncoder.BitmapFormat.PNG);

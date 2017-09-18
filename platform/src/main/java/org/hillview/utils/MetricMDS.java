@@ -10,8 +10,9 @@ import java.util.function.BiFunction;
 
 public class MetricMDS {
     public static int maxIterations = (int) 1e4;
-    public static double defaultLearningRate = 0.1;
-    public static double tolerance = 1e-8;
+    public static double defaultLearningRate = 0.2;
+    public static double defaultLearningRateDecay = 0.995;
+    public static double tolerance = 1e-9;
     public static int minConvergedCount = 10;
 
     public static BiFunction<DoubleMatrix, DoubleMatrix, Double> squaredEuclid = (x1, x2) -> MatrixFunctions.pow(x1.sub
@@ -27,20 +28,14 @@ public class MetricMDS {
      */
     private int lowDims;
     /**
-     * Learning rate to use in the optimization.
+     * Learning rate and its decay to use in the optimization.
      */
     public double learningRate = MetricMDS.defaultLearningRate;
+    public double learningRateDecay = MetricMDS.defaultLearningRateDecay;
     /**
      * If the magnitude of the gradient is smaller than this value, we consider the optimization converged.
      */
     public double stopTolerance = MetricMDS.tolerance;
-
-    /**
-     * Constant term in the cost gradient that can be reused over the entire optimization.
-     * It is the square root of 1 over the sum of the distances squared between all (unordered, so
-     * only counted once) pairs of nD points.
-     */
-    private double c1;
 
     /**
      * All pairwise distances d(i, j) in nD. Since it is symmetric, only the upper-triangular part is stored.
@@ -49,7 +44,7 @@ public class MetricMDS {
      * Note that the diagonal d(i, i) is not contained in the matrix, as d(i, i) = 0 always.
      */
     private final DoubleMatrix ndDists;
-
+    public double scaling;
     /**
      * Same format for the low-dimensional distances, but this matrix is recomputed every epoch.
      */
@@ -65,7 +60,7 @@ public class MetricMDS {
      * always the Euclidean distance, as the gradient is calculated for this.
      * @param dataNd High-dimensional data with observations/{data points} as rows, and dimensions/features as columns.
      * @param lowDims The target dimensionality of the embedding. Commonly 2.
-     * @param highDimDist The distance function for nD observations. Commonly Euclidean.
+     * @param highDimDist The distance function for nD observations.
      */
     public MetricMDS(DoubleMatrix dataNd, int lowDims, BiFunction<DoubleMatrix, DoubleMatrix, Double> highDimDist) {
         this.numObservations = dataNd.rows;
@@ -73,7 +68,6 @@ public class MetricMDS {
         this.ndDists = this.computeHighDimDistances(dataNd, highDimDist);
         this.dataMd = new DoubleMatrix();
         this.mdDists = new DoubleMatrix();
-        this.c1 = Math.sqrt(1 / MatrixFunctions.pow(this.ndDists, 2).sum());
     }
 
     public MetricMDS(DoubleMatrix dataNd, int lowDims) {
@@ -84,6 +78,10 @@ public class MetricMDS {
         this(dataNd, 2);
     }
 
+    private int compactIndex(int i, int j) {
+        return i * this.numObservations - (i * (i + 3)) / 2 + j - 1;
+    }
+
     private DoubleMatrix computeHighDimDistances(DoubleMatrix dataNd, BiFunction<DoubleMatrix, DoubleMatrix, Double> distNd) {
         DoubleMatrix dists = new DoubleMatrix((dataNd.rows * (dataNd.rows - 1)) / 2);
         for (int i = 0; i < dataNd.rows - 1; i++) {
@@ -91,10 +89,14 @@ public class MetricMDS {
             for (int j = i + 1; j < dataNd.rows; j++) {
                 DoubleMatrix x2 = dataNd.get(new PointRange(j), new AllRange());
                 double dist = distNd.apply(x1, x2);
-                int idx = i * dataNd.rows - (i * (i + 3)) / 2 + j - 1;
+                int idx = this.compactIndex(i, j);
                 dists.put(idx, dist);
             }
         }
+        /* Normalize the distances s.t. the largest is 1. */
+        this.scaling = 1 / dists.max();
+        dists.muli(this.scaling);
+
         return dists;
     }
 
@@ -106,9 +108,9 @@ public class MetricMDS {
      */
     private double getHighDimDist(int i, int j) {
         if (i < j)
-            return this.ndDists.get(i * this.numObservations - (i * (i + 3)) / 2 + j - 1);
+            return this.ndDists.get(this.compactIndex(i, j));
         else if (j < i) {
-            return this.ndDists.get(j * this.numObservations - (j * (j + 3)) / 2 + i - 1);
+            return this.ndDists.get(this.compactIndex(j, i));
         } else {
             return 0;
         }
@@ -121,7 +123,7 @@ public class MetricMDS {
             for (int j = i + 1; j < dataMd.rows; j++) {
                 DoubleMatrix x2 = dataMd.get(new PointRange(j), new AllRange());
                 double dist = MetricMDS.euclid.apply(x1, x2);
-                int idx = i * dataMd.rows - (i * (i + 3)) / 2 + j - 1;
+                int idx = this.compactIndex(i, j);
                 dists.put(idx, dist);
             }
         }
@@ -130,9 +132,9 @@ public class MetricMDS {
 
     private double getLowDimDist(int i, int j) {
         if (i < j)
-            return this.mdDists.get(i * this.numObservations - (i * (i + 3)) / 2 + j - 1);
+            return this.mdDists.get(this.compactIndex(i, j));
         else if (j < i) {
-            return this.mdDists.get(j * this.numObservations - (j * (j + 3)) / 2 + i - 1);
+            return this.mdDists.get(this.compactIndex(j, i));
         } else {
             return 0;
         }
@@ -151,11 +153,12 @@ public class MetricMDS {
             /* Actual learning step */
             this.dataMd.addi(gradient.mul(this.learningRate).neg());
             double newCost = this.cost();
-            step = newCost - cost;
+            step = (newCost - cost) / this.learningRate;
             System.out.println(String.format("[iter %d]:\n\tcost: %6.3e\n\tstep: %6.3e\n\tmagnitude: %6.3e",
                     iterations, newCost, step, magnitude));
             iterations++;
             cost = newCost;
+            this.learningRate *= this.learningRateDecay;
             if (iterations > 0 && Math.abs(step) < MetricMDS.tolerance) {
                 convergedCount++;
                 System.out.println(convergedCount);
